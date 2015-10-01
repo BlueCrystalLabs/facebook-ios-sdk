@@ -28,6 +28,7 @@
 #import "FBSDKCoreKitTestUtility.h"
 #import "FBSDKGraphRequest+Internal.h"
 #import "FBSDKGraphRequestPiggybackManager.h"
+#import "FBSDKSettings+Internal.h"
 
 @interface FBSDKGraphRequestConnectionTests : XCTestCase <FBSDKGraphRequestConnectionDelegate>
 @property (nonatomic, copy) void (^requestConnectionStartingCallback)(FBSDKGraphRequestConnection *connection);
@@ -111,13 +112,15 @@ static id g_mockNSBundle;
     XCTAssertFalse([body rangeOfString:@"access_token"].location == NSNotFound);
     return YES;
   } withStubResponse:^OHHTTPStubsResponse *(NSURLRequest *request) {
-    NSData *data =  [@"{\"error\": {\"message\": \"Token is broke\",\"code\": 190,\"error_subcode\": 463}}" dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *data =  [@"{\"error\": {\"message\": \"Token is broke\",\"code\": 190,\"error_subcode\": 463, \"type\":\"OAuthException\"}}" dataUsingEncoding:NSUTF8StringEncoding];
 
     return [OHHTTPStubsResponse responseWithData:data
                                       statusCode:400
                                          headers:nil];
   }];
-  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil] startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
+  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}] startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
+    // make sure there is no recovery info for client token failures.
+    XCTAssertNil(error.localizedRecoverySuggestion);
     [exp fulfill];
   }];
   [self waitForExpectationsWithTimeout:2 handler:^(NSError *error) {
@@ -141,7 +144,7 @@ static id g_mockNSBundle;
                                       statusCode:400
                                          headers:nil];
   }];
-  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil flags:FBSDKGraphRequestFlagSkipClientToken]
+  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""} flags:FBSDKGraphRequestFlagSkipClientToken]
    startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
      [exp fulfill];
    }];
@@ -168,11 +171,11 @@ static id g_mockNSBundle;
   FBSDKGraphRequestConnection *connection = [[FBSDKGraphRequestConnection alloc] init];
   __block int actualCallbacksCount = 0;
   XCTestExpectation *expectation = [self expectationWithDescription:@"expected to receive delegate completion"];
-  [connection addRequest:[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil]
+  [connection addRequest:[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}]
        completionHandler:^(FBSDKGraphRequestConnection *conn, id result, NSError *error) {
          XCTAssertEqual(1, actualCallbacksCount++, @"this should have been the second callback");
        }];
-  [connection addRequest:[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil]
+  [connection addRequest:[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}]
        completionHandler:^(FBSDKGraphRequestConnection *conn, id result, NSError *error) {
          XCTAssertEqual(2, actualCallbacksCount++, @"this should have been the third callback");
        }];
@@ -182,6 +185,32 @@ static id g_mockNSBundle;
   self.requestConnectionCallback = ^(FBSDKGraphRequestConnection *conn, NSError *error) {
     NSCAssert(error == nil, @"unexpected error:%@", error);
     NSCAssert(3 == actualCallbacksCount++, @"this should have been the fourth callback");
+    [expectation fulfill];
+  };
+  connection.delegate = self;
+  [connection start];
+  [self waitForExpectationsWithTimeout:5 handler:^(NSError *error) {
+    XCTAssertNil(error);
+  }];
+
+  [mockPiggybackManager stopMocking];
+}
+
+- (void)testConnectionDelegateWithNetworkError
+{
+  id mockPiggybackManager = [[self class] mockCachedServerConfiguration];
+  [OHHTTPStubs stubRequestsPassingTest:^BOOL(NSURLRequest *request) {
+    return YES;
+  } withStubResponse:^OHHTTPStubsResponse *(NSURLRequest *request) {
+    // stub a response indicating a disconnected network
+    return [OHHTTPStubsResponse responseWithError:[NSError errorWithDomain:@"NSURLErrorDomain" code:-1009 userInfo:nil]];
+  }];
+  FBSDKGraphRequestConnection *connection = [[FBSDKGraphRequestConnection alloc] init];
+  XCTestExpectation *expectation = [self expectationWithDescription:@"expected to receive network error"];
+  [connection addRequest:[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}]
+       completionHandler:^(FBSDKGraphRequestConnection *conn, id result, NSError *error) {}];
+  self.requestConnectionCallback = ^(FBSDKGraphRequestConnection *conn, NSError *error) {
+    NSCAssert(error != nil, @"didFinishLoading shouldn't have been called");
     [expectation fulfill];
   };
   connection.delegate = self;
@@ -225,7 +254,7 @@ static id g_mockNSBundle;
                                              expirationDate:[NSDate distantPast]
                                              refreshDate:[NSDate distantPast]];
   [FBSDKAccessToken setCurrentAccessToken:tokenThatNeedsRefresh];
-  FBSDKGraphRequest *request = [[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil];
+  FBSDKGraphRequest *request = [[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}];
   XCTestExpectation *exp = [self expectationWithDescription:@"completed request"];
   [request startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
     XCTAssertEqualObjects(tokenThatNeedsRefresh.userID, result[@"id"]);
@@ -257,7 +286,7 @@ static id g_mockNSBundle;
                                       expirationDate:[NSDate distantPast]
                                       refreshDate:[NSDate date]];
   [FBSDKAccessToken setCurrentAccessToken:tokenNoRefresh];
-  FBSDKGraphRequest *request = [[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil];
+  FBSDKGraphRequest *request = [[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}];
   XCTestExpectation *exp = [self expectationWithDescription:@"completed request"];
   [OHHTTPStubs stubRequestsPassingTest:^BOOL(NSURLRequest *r) {
     // assert the path of r is "me"; since piggyback would go to root batch endpoint.
@@ -313,7 +342,7 @@ static id g_mockNSBundle;
                                       statusCode:400
                                          headers:nil];
   }];
-  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil]
+  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}]
    startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
      XCTAssertNil(result);
      XCTAssertEqualObjects(@"Token is broke", error.userInfo[FBSDKErrorDeveloperMessageKey]);
@@ -356,7 +385,7 @@ static id g_mockNSBundle;
                                          headers:nil];
   }];
   [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me"
-                                     parameters:nil
+                                     parameters:@{@"fields":@""}
                                     tokenString:@"notCurrentToken"
                                         version:nil
                                      HTTPMethod:nil]
@@ -401,7 +430,7 @@ static id g_mockNSBundle;
                                       statusCode:400
                                          headers:nil];
   }];
-  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil flags:FBSDKGraphRequestFlagDoNotInvalidateTokenOnError]
+  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""} flags:FBSDKGraphRequestFlagDoNotInvalidateTokenOnError]
    startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
      XCTAssertNil(result);
      XCTAssertEqualObjects(@"Token is broke", error.userInfo[FBSDKErrorDeveloperMessageKey]);
@@ -413,6 +442,43 @@ static id g_mockNSBundle;
   }];
   XCTAssertNotNil([FBSDKAccessToken currentAccessToken]);
   [mockPiggybackManager stopMocking];
+}
+
+- (void)testUserAgentSuffix
+{
+  XCTestExpectation *exp = [self expectationWithDescription:@"completed request"];
+  XCTestExpectation *exp2 = [self expectationWithDescription:@"completed request 2"];
+  __block int requestCount = 0;
+  [FBSDKAccessToken setCurrentAccessToken:nil];
+  [FBSDKSettings setUserAgentSuffix:@"UnitTest.1.0.0"];
+  [OHHTTPStubs stubRequestsPassingTest:^BOOL(NSURLRequest *request) {
+    NSString *actualUserAgent = [request valueForHTTPHeaderField:@"User-Agent"];
+    if (++requestCount == 1) {
+      XCTAssertTrue([actualUserAgent hasSuffix:@"/UnitTest.1.0.0"], @"unexpected user agent %@", actualUserAgent);
+    } else if (requestCount == 2){
+      XCTAssertFalse([actualUserAgent hasSuffix:@"/UnitTest.1.0.0"], @"unexpected user agent %@", actualUserAgent);
+    }
+    return YES;
+  } withStubResponse:^OHHTTPStubsResponse *(NSURLRequest *request) {
+    NSData *data =  [@"{\"error\": {\"message\": \"Missing oktne\",\"code\": 190, \"type\":\"OAuthException\"}}" dataUsingEncoding:NSUTF8StringEncoding];
+
+    return [OHHTTPStubsResponse responseWithData:data
+                                      statusCode:400
+                                         headers:nil];
+  }];
+  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}] startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
+    [exp fulfill];
+  }];
+
+  [FBSDKSettings setUserAgentSuffix:nil];
+  // issue a second request o verify clearing out of user agent suffix
+  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}] startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
+    [exp2 fulfill];
+  }];
+
+  [self waitForExpectationsWithTimeout:2 handler:^(NSError *error) {
+    XCTAssertNil(error);
+  }];
 }
 
 #pragma mark - Error recovery.
@@ -436,7 +502,7 @@ static id g_mockNSBundle;
                                       statusCode:400
                                          headers:nil];
   }];
-  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil] startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
+  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}] startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
     //verify we get the second error instance.
     XCTAssertEqual(2, [error.userInfo[FBSDKGraphRequestErrorGraphErrorCode] integerValue]);
     [expectation fulfill];
@@ -468,7 +534,7 @@ static id g_mockNSBundle;
                                       statusCode:400
                                          headers:nil];
   }];
-  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:nil] startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
+  [[[FBSDKGraphRequest alloc] initWithGraphPath:@"me" parameters:@{@"fields":@""}] startWithCompletionHandler:^(FBSDKGraphRequestConnection *connection, id result, NSError *error) {
     //verify we don't get the second error instance.
     XCTAssertEqual(1, [error.userInfo[FBSDKGraphRequestErrorGraphErrorCode] integerValue]);
     [expectation fulfill];
